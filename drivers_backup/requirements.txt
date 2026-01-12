@@ -1,0 +1,15 @@
+# Dépendances pour le projet Chatbot Pi 5
+# Installation : pip install -r requirements.txt --break-system-packages
+
+# Matériel & Drivers
+rpi-lgpio     # Équivalent RPi.GPIO pour Raspberry Pi 5
+spidev        # Communication bus SPI
+
+# Traitement d'image (pour les écrans LCD)
+Pillow        # Bibliothèque PIL pour créer des images/texte
+numpy         # Optimisation du traitement des pixels
+
+# Audio & Reconnaissance Vocale (Prochaines étapes)
+# PyAudio     # Capture audio (nécessite libportaudio2)
+# SpeechRecognition
+# openai-whisper # Ou autre moteur de STT
