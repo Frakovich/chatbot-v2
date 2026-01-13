@@ -20,8 +20,13 @@ def test_microphone():
     
     for i, dev in enumerate(devices):
         print(f"Index {i}: {dev['name']} (In: {dev['max_input_channels']}, Out: {dev['max_output_channels']})")
-        # On cherche un device avec 'USB' dans le nom et au moins 1 canal d'entrée
-        if 'USB' in dev['name'] and dev['max_input_channels'] > 0:
+        # On cherche spécifiquement le matériel détecté par le système (PCM2902 ou USB PnP)
+        dev_name = dev['name'].lower()
+        if ('usb pnp' in dev_name or 'pcm2902' in dev_name) and dev['max_input_channels'] > 0:
+            usb_device_index = i
+            break # On a trouvé le bon !
+        # Repli sur une recherche 'usb' générique si le nom précis n'est pas trouvé
+        elif 'usb' in dev_name and dev['max_input_channels'] > 0 and usb_device_index is None:
             usb_device_index = i
     
     if usb_device_index is not None:
@@ -36,10 +41,41 @@ def test_microphone():
     for rate in rates_to_try:
         try:
             print(f"\n[🎤] Essai enregistrement à {rate} Hz (Device Index: {device_to_use})...")
-            audio = sd.rec(int(DURATION * rate), samplerate=rate, channels=CHANNELS, device=device_to_use, dtype='int16')
-            sd.wait()
-            print("[⏹] Enregistrement terminé.")
             
+            # --- Ajout du VU-mètre visuel ---
+            recorded_frames = []
+
+            def callback(indata, frames, time, status):
+                if status:
+                    print(status)
+                recorded_frames.append(indata.copy())
+                
+                # Calcul du niveau pour le VU-mètre (RMS plus robuste)
+                # On convertit en float pour éviter les overflows sur les entiers courts
+                data_float = indata.astype(np.float32)
+                rms = np.sqrt(np.mean(data_float**2))
+                
+                if np.isnan(rms):
+                    rms = 0
+                
+                # Normalisation sur une échelle de 0 à 100 (basé sur 16-bit ~32768)
+                # On divise par ~300 au lieu de multiplier pour avoir une échelle cohérente
+                level = (rms / 32768.0) * 100
+                
+                bar_length = int(level * 2) # Facteur visuel
+                if bar_length > 50: bar_length = 50
+                bar = "#" * bar_length
+                print(f"\rVolume: [{bar:<50}] {int(rms)}", end="", flush=True)
+
+            with sd.InputStream(samplerate=rate, channels=CHANNELS, device=device_to_use, dtype='int16', callback=callback):
+                time.sleep(DURATION)
+            
+            print("\n[⏹] Enregistrement terminé.")
+            
+            # Reconstitution du signal complet
+            audio = np.concatenate(recorded_frames, axis=0)
+            # ---------------------------------
+
             # Vérification
             max_val = np.max(np.abs(audio))
             print(f"Niveau Max (Amplitude): {max_val} / 32767")
