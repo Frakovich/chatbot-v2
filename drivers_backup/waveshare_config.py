@@ -1,6 +1,7 @@
 # Configuration Pinout pour Waveshare Triple LCD HAT (Mode BCM)
 
 # Ecran 1 : 1.3 inch (Centre) - Utilise SPI1
+# Necessite dtoverlay=spi1-1cs dans /boot/firmware/config.txt
 LCD_1_3 = {
     "name": "1.3 inch (Center)",
     "spi_bus": 1,
@@ -8,13 +9,13 @@ LCD_1_3 = {
     "rst": 27,
     "dc": 22,
     "bl": 19,
-    "cs": 18,
-    "madctl": 0x00, # RGB mode
+    "cs": 18, # Hardware CS for SPI1 CE0
+    "madctl": 0x60, # MX + MV + MY (Portrait but upside down ?) -> Needs software rotation
     "width": 240,
     "height": 240,
     "col_start": 0,
     "row_start": 0,
-    "rotation": 180
+    "rotation": 180 # Software rotation needed
 }
 
 # Ecran 2 : 0.96 inch (SPI0 CE0)
@@ -25,8 +26,8 @@ LCD_0_96_1 = {
     "rst": 24,
     "dc": 4,
     "bl": 13,
-    "cs": 8,
-    "madctl": 0x08, # BGR mode (Fix for blue/red swap)
+    "cs": 8, # Hardware CS for SPI0 CE0
+    "madctl": 0x70, # Swap XY
     "width": 160,
     "height": 80,
     "col_start": 0,
@@ -42,8 +43,8 @@ LCD_0_96_2 = {
     "rst": 23,
     "dc": 5,
     "bl": 12,
-    "cs": 7,
-    "madctl": 0x08, # BGR mode (Fix for blue/red swap)
+    "cs": 7, # Hardware CS for SPI0 CE1
+    "madctl": 0x70, # Swap XY
     "width": 160,
     "height": 80,
     "col_start": 0,
