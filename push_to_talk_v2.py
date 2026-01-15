@@ -18,6 +18,8 @@ RECORD_PIN = KEYS['KEY2']
 VALIDATE_PIN = KEYS['KEY1']
 OLLAMA_MODEL = "llama3.2:latest"
 TEMP_AUDIO_FILE = "/tmp/recording.wav"
+STATIC_HOLD_SECONDS = 3.0
+SCROLL_SPEED = 0.8
 
 # --- INIT HARDWARE ---
 print("Initialisation des ecrans...")
@@ -33,11 +35,12 @@ GPIO.setup(VALIDATE_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 # --- GLOBAL STATE ---
 state = "IDLE"
 user_text = ""
-bot_text = "Pret. Maintenez K2 pour parler."
+bot_text = "Bonjour. Je suis Iana."
 scroll_y = 0.0
 bot_strip = None
 running = True
 lock = threading.Lock()
+last_bot_update_time = 0.0
 
 # --- FONTS ---
 def get_font(size):
@@ -47,132 +50,202 @@ def get_font(size):
     except:
         return ImageFont.load_default()
 
+def wrap_text_pixel(text, font, width):
+    """
+    Wraps text based on pixel width, not character count.
+    Returns a list of lines.
+    """
+    words = text.split()
+    if not words:
+        return []
+
+    lines = []
+    current_line = words[0]
+    
+    # We need a dummy drawable to measure text without creating a new image every time
+    dummy_img = Image.new('RGB', (1, 1))
+    dummy_draw = ImageDraw.Draw(dummy_img)
+
+    for word in words[1:]:
+        # Check width of the line with the new word
+        test_line = f"{current_line} {word}"
+        bbox = dummy_draw.textbbox((0, 0), test_line, font=font)
+        w = bbox[2] - bbox[0]
+        
+        if w > width:
+            # The new word makes the line too long, so save the current line
+            lines.append(current_line)
+            current_line = word
+        else:
+            # The new word fits, so add it to the current line
+            current_line = test_line
+    
+    # Add the last remaining line
+    lines.append(current_line)
+    return lines
+
 font_ui = get_font(16)
-font_text = get_font(14)
+font_text = get_font(16)
 font_sm = get_font(12)
 font_large = get_font(24)
 
 # --- UI LOGIC ---
-def create_bot_strip(text, width):
-    # Wrapping plus large pour l'ecran central
-    lines = textwrap.wrap(text, width=28)
-    line_h = 18
-    padding_top = 5
-    padding_bottom = 60 # Espace pour respirer en fin de scroll
+def create_bot_strip(text, width, height, font):
+    """
+    Creates an image strip for the main display.
+    Returns a static image if text fits, or a long scrolling strip if it doesn't.
+    """
+    # Use a 10px margin for the text
+    lines = wrap_text_pixel(text, font, width - 10)
     
-    total_h = len(lines) * line_h + padding_top + padding_bottom
-    # On laisse un peu de marge sur les bords
-    img = Image.new('RGB', (width - 10, max(total_h, 100)), (0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    
-    y = padding_top
-    for line in lines:
-        draw.text((0, y), line, font=font_text, fill=(255, 255, 255))
-        y += line_h
-    return img
+    # Get realistic line height
+    line_h = font.getbbox("Mg")[3] - font.getbbox("Mg")[1] + 4
+    total_h = len(lines) * line_h
+
+    # --- CONDITIONAL LOGIC ---
+    if total_h <= height:
+        # Text fits, create a static, centered image
+        img = Image.new('RGB', (width, height), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        y = (height - total_h) / 2 # Center the whole block
+        for line in lines:
+            draw.text((5, y), line, font=font, fill=(255, 255, 255))
+            y += line_h
+        return img
+    else:
+        # Text overflows, create a long scrolling strip
+        # Add padding at the bottom so the last line can scroll to the top
+        strip_h = total_h + height - line_h
+        img = Image.new('RGB', (width, strip_h), (0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        y = 5 # Small top padding
+        for line in lines:
+            draw.text((5, y), line, font=font, fill=(255, 255, 255))
+            y += line_h
+        return img
 
 def update_bot_text(text):
-    global bot_text, bot_strip, scroll_y
+    global bot_text, bot_strip, scroll_y, last_bot_update_time
     with lock:
         bot_text = text
-        bot_strip = create_bot_strip(text, disp.width)
+        # Pass dimensions and font to the strip creator
+        bot_strip = create_bot_strip(text, disp.width, disp.height, font_text)
         scroll_y = 0.0
+        last_bot_update_time = time.time()
 
-def update_side_screens(current_state):
-    texts = {
-        "IDLE": "PRET",
-        "RECORDING": "ECOUTE",
-        "PROCESSING": "ANALYSE",
-        "VALIDATE": "VALIDER",
-        "THINKING": "PENSE..."
-    }
-    txt = texts.get(current_state, "IANA")
+def update_side_screens(text_left, text_right):
+    # Font for side screens - smaller
+    font = get_font(18)
     
-    img = Image.new('RGB', (disp_side1.width, disp_side1.height), (0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    bbox = draw.textbbox((0, 0), txt, font=font_large)
-    w_text = bbox[2] - bbox[0]
-    h_text = bbox[3] - bbox[1]
-    x = (disp_side1.width - w_text) / 2
-    y = (disp_side1.height - h_text) / 2
-    draw.text((x, y), txt, font=font_large, fill=(255, 255, 255))
+    # --- Process left screen ---
+    img1 = Image.new('RGB', (disp_side1.width, disp_side1.height), (0, 0, 0))
+    draw1 = ImageDraw.Draw(img1)
     
-    disp_side1.display(img)
-    disp_side2.display(img)
+    # Use the new reliable wrapper with a small margin
+    lines1 = wrap_text_pixel(text_left, font, disp_side1.width - 10)
+    
+    # Calculate total height to center the text block
+    line_h = (font.getbbox("Mg")[3] - font.getbbox("Mg")[1]) + 2 # Get real line height
+    total_h = len(lines1) * line_h
+    y1 = (disp_side1.height - total_h) / 2
+    
+    for line in lines1:
+        bbox = draw1.textbbox((0, 0), line, font=font)
+        w = bbox[2] - bbox[0]
+        x = (disp_side1.width - w) / 2 # Center each line horizontally
+        draw1.text((x, y1), line, font=font, fill=(255, 255, 255))
+        y1 += line_h
+    disp_side1.display(img1)
+
+    # --- Process right screen (same logic) ---
+    img2 = Image.new('RGB', (disp_side2.width, disp_side2.height), (0, 0, 0))
+    draw2 = ImageDraw.Draw(img2)
+    lines2 = wrap_text_pixel(text_right, font, disp_side2.width - 10)
+    
+    total_h_2 = len(lines2) * line_h
+    y2 = (disp_side2.height - total_h_2) / 2
+    
+    for line in lines2:
+        bbox = draw2.textbbox((0, 0), line, font=font)
+        w = bbox[2] - bbox[0]
+        x = (disp_side2.width - w) / 2
+        draw2.text((x, y2), line, font=font, fill=(255, 255, 255))
+        y2 += line_h
+    disp_side2.display(img2)
 
 def display_thread_func():
-    global scroll_y, running
-    last_state = None
+    global scroll_y, running, last_bot_update_time
     
+    # On fait le premier rendu du message d'accueil
     update_bot_text(bot_text)
     
     while running:
         start_time = time.time()
         
-        # Copie locale des etats pour eviter les locks longs
         with lock:
             curr_state = state
             curr_user = user_text
             curr_strip = bot_strip
             curr_scroll = scroll_y
+            last_update = last_bot_update_time
         
-        # Preparation de la frame
         img = Image.new('RGB', (disp.width, disp.height), (0, 0, 0))
         draw = ImageDraw.Draw(img)
         
-        # Barre de statut
-        status_colors = {
-            "IDLE": (0, 255, 0),
-            "RECORDING": (255, 0, 0),
-            "PROCESSING": (0, 0, 255),
-            "VALIDATE": (255, 255, 0),
-            "THINKING": (255, 165, 0)
-        }
-        color = status_colors.get(curr_state, (200, 200, 200))
-        draw.rectangle([(0,0), (disp.width, 5)], fill=color)
-        draw.text((5, 10), f"MODE: {curr_state}", font=font_ui, fill=(200, 200, 200))
-        
-        # Zone Texte Utilisateur
-        draw.line([(0, 40), (disp.width, 40)], fill=(50, 50, 50))
-        lines_user = textwrap.wrap(curr_user, width=28)
-        uy = 45
-        for line in lines_user[:3]:
-            draw.text((5, uy), line, font=font_text, fill=(100, 255, 255))
-            uy += 18
-
-        # Aide Validation
         if curr_state == "VALIDATE":
-            draw.rectangle([(0, 100), (disp.width, 120)], fill=(40, 40, 0))
-            draw.text((10, 102), "K1: OUI | K2: NON", font=font_sm, fill=(255, 255, 0))
+            # --- LAYOUT VALIDATION ---
+            # Utilise le nouveau wrapper pour le texte utilisateur
+            lines_user = wrap_text_pixel(curr_user, font_text, disp.width - 20)
             
-        # Zone Texte Bot (Scrolling)
-        bot_area_y = 125
-        draw.line([(0, bot_area_y), (disp.width, bot_area_y)], fill=(50, 50, 50))
-        
-        area_h = disp.height - bot_area_y - 5
-        if curr_strip:
-            sy = int(curr_scroll)
-            # Si on depasse la fin, on boucle
-            if sy >= curr_strip.height - area_h/2 and curr_strip.height > area_h:
-                with lock: scroll_y = 0.0
-                sy = 0
+            line_h = font_text.getbbox("Mg")[3] - font_text.getbbox("Mg")[1] + 4
+            total_h = len(lines_user) * line_h
             
-            # Crop de la bande
-            crop_h = min(area_h, curr_strip.height - sy)
-            if crop_h > 0:
-                crop = curr_strip.crop((0, sy, disp.width - 10, sy + crop_h))
-                img.paste(crop, (5, bot_area_y + 5))
+            # Centre le bloc de texte verticalement, un peu vers le haut
+            uy = (disp.height - total_h) / 2 - 20
             
-            # Increment scroll si le texte est plus long que la zone
-            if curr_strip.height > area_h + 10:
-                with lock: scroll_y += 1.0 # Vitesse de scroll (pixels par frame)
-        
+            for line in lines_user:
+                bbox = draw.textbbox((0, 0), line, font=font_text)
+                w = bbox[2] - bbox[0]
+                # Centre chaque ligne horizontalement
+                draw.text(((disp.width - w) / 2, uy), line, font=font_text, fill=(100, 255, 255))
+                uy += line_h
+
+            # Aide pour la validation en bas
+            help_text = "K1: Valider | K2: Annuler"
+            bbox = draw.textbbox((0, 0), help_text, font=font_ui)
+            w = bbox[2] - bbox[0]
+            draw.text(((disp.width - w) / 2, disp.height - 30), help_text, font=font_ui, fill=(255, 255, 0))
+
+        elif curr_strip:
+            # --- DYNAMIC DISPLAY LOGIC (STATIC OR SCROLL) ---
+            is_scrolling = curr_strip.height > disp.height
+
+            if not is_scrolling:
+                # It's a static image, just paste it
+                img.paste(curr_strip, (0, 0))
+            else:
+                # It's a scrolling strip
+                area_h = disp.height
+                sy = int(curr_scroll)
+
+                # If we've scrolled to the end, pause and then loop back
+                if sy >= curr_strip.height - area_h:
+                    time.sleep(1.5)  # Pause at the end before looping
+                    with lock:
+                        scroll_y = 0.0
+                        # Reset the timer to enforce the static hold again on loop
+                        last_bot_update_time = time.time()
+                    sy = 0  # Use 0 for this frame's render
+
+                crop = curr_strip.crop((0, sy, disp.width, sy + area_h))
+                img.paste(crop, (0, 0))
+
+                # Increment scroll position only after the hold time has passed
+                if time.time() - last_update > STATIC_HOLD_SECONDS:
+                    with lock:
+                        scroll_y += SCROLL_SPEED
+
         disp.display(img)
-        
-        # Mise a jour ecrans lateraux sur changement d'etat
-        if curr_state != last_state:
-            update_side_screens(curr_state)
-            last_state = curr_state
             
         # Regulation FPS (~20 FPS)
         elapsed = time.time() - start_time
@@ -221,60 +294,73 @@ def transcribe_audio():
 # --- MAIN LOOP ---
 def main():
     global state, user_text, running
-    
+
     # Lancement du thread d'affichage
     t = threading.Thread(target=display_thread_func)
     t.daemon = True
     t.start()
+
+    # Etat initial des ecrans lateraux
+    update_side_screens("Maintenez K2 pour parler", "IDLE")
     
     try:
         while True:
             # Attente K2 (Enregistrement)
             if GPIO.input(RECORD_PIN) == GPIO.LOW:
-                with lock:
-                    state = "RECORDING"
-                    user_text = "..."
+                # On nettoie l'ecran central et on change l'etat
+                update_bot_text("") 
+                with lock: state = "RECORDING"
+                update_side_screens("Enregistrement...", "RECORDING")
                 
                 if record_audio_hold():
                     with lock: state = "PROCESSING"
+                    update_side_screens("Transcription...", "PROCESSING")
                     txt = transcribe_audio()
                     
                     if txt:
                         with lock:
                             user_text = txt
                             state = "VALIDATE"
+                        update_side_screens("Validez votre texte", "VALIDATE")
                         
-                        # Attente Validation (K1) ou Annulation (K2)
                         validated = False
-                        while True:
+                        # Boucle de validation
+                        while state == "VALIDATE":
                             if GPIO.input(VALIDATE_PIN) == GPIO.LOW:
                                 validated = True
                                 break
                             if GPIO.input(RECORD_PIN) == GPIO.LOW:
-                                # Anti-rebond
                                 while GPIO.input(RECORD_PIN) == GPIO.LOW: time.sleep(0.01)
                                 break
                             time.sleep(0.05)
                         
                         if validated:
-                            with lock: state = "THINKING"
+                            prompt_for_api = ""
+                            with lock:
+                                state = "THINKING"
+                                prompt_for_api = user_text
+                                user_text = "" # Efface pour l'ecran central
+                            update_side_screens("Iana réfléchit...", "THINKING")
+                            
                             try:
                                 messages = [
                                     {'role': 'system', 'content': 'Tu es Iana, un assistant concis et efficace. Réponds en français.'},
-                                    {'role': 'user', 'content': user_text}
+                                    {'role': 'user', 'content': prompt_for_api}
                                 ]
                                 response = ollama.chat(model=OLLAMA_MODEL, messages=messages)
                                 update_bot_text(response['message']['content'])
                             except Exception as e:
                                 update_bot_text(f"Erreur Ollama: {e}")
-                        else:
-                            with lock: user_text = "(Annule)"
-                    else:
-                        with lock: user_text = "(Pas compris)"
+                        else: # Annulation
+                             with lock: user_text = "" # Clear le texte de validation
+                    else: # Pas de transcription
+                        update_bot_text("(Je n'ai pas compris)") # Affiche l'erreur au centre
                     
+                    # Retour a l'etat initial
                     with lock: state = "IDLE"
-                
-                # Anti-rebond final
+                    update_side_screens("Maintenez K2 pour parler", "IDLE")
+
+                # Anti-rebond
                 while GPIO.input(RECORD_PIN) == GPIO.LOW: time.sleep(0.1)
             
             time.sleep(0.1)
